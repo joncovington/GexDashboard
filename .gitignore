@@ -1,0 +1,13 @@
+# Secrets — never commit these
+.env
+
+# Runtime data — local only
+data/gex_history_*.json
+gex.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
