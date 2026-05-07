@@ -741,74 +741,55 @@ function computeSignal(snap) {
       ]
     };
 
-  // ── Near-wall alerts (between walls, within 50 pts) ──────────────────────
-  } else if (nearWall) {
-    if (toCall < toPut) {
-      name     = 'CALL SIDE (NEAR WALL)';
-      desc     = 'SPX (' + FMT_NUM(spot) + ') is approaching the Call Wall (' + FMT_NUM(callWall) + ') from below — only ' + Math.round(toCall) + ' pts away. Watch for a confirmed break above ' + FMT_NUM(callWall) + ' to trigger a call-side entry. Strikes shown are ready to execute on breakout.';
-      cssClass = 'call-side';
+  // ── Between walls / near wall: unified directional signal ───────────────
+  // Closer to Call Wall → sell PUT credit spread, short at Put Wall, target = Call Wall
+  // Closer to Put Wall → sell CALL credit spread, short at Call Wall, target = Put Wall
+  } else {
+    if (toCall <= toPut) {
+      const nearNote = toCall < 50 ? ' — ' + Math.round(toCall) + ' PTS FROM WALL' : '';
+      name     = 'PUT SPREAD — CALL WALL PIN' + nearNote;
+      desc     = 'SPX (' + FMT_NUM(spot) + ') is between walls and closer to the Call Wall (' + FMT_NUM(callWall) + '). In positive gamma, price is magnetically drawn toward the Call Wall. Open Leg 1 now: sell a put credit spread with the short strike at the Put Wall (' + FMT_NUM(putWall) + ') — the structural GEX support floor that price is unlikely to break. Close for profit (or add Leg 2 call debit spread) when price reaches ' + FMT_NUM(callWall) + '.';
+      cssClass = 'put-side';
       checks   = [
-        { label: 'GEX regime positive',                                         pass: regime === 'positive' },
-        { label: 'Spot above Zero Gamma (' + FMT_NUM(zeroGamma) + ')',          pass: true },
-        { label: 'Approaching Call Wall — ' + Math.round(toCall) + ' pts away', pass: true },
-        { label: 'Net GEX > +0.1B — wall will hold (' + FMT_GEX(netGex) + ')', pass: strongPos },
-        { label: 'ATM IV > 10% (' + FMT_PCT(iv) + ')',                          pass: iv > 0.10 },
+        { label: 'GEX regime positive',                                           pass: regime === 'positive' },
+        { label: 'Spot above Zero Gamma (' + FMT_NUM(zeroGamma) + ')',            pass: true },
+        { label: 'Call Wall (' + FMT_NUM(callWall) + ') is the pin target',       pass: null },
+        { label: 'Net GEX > +0.1B — walls sticky (' + FMT_GEX(netGex) + ')',     pass: strongPos },
+        { label: 'ATM IV > 10% — enough premium (' + FMT_PCT(iv) + ')',           pass: iv > 0.10 },
       ];
       strikes = {
-        title: 'READY ON BREAKOUT — CALL CREDIT SPREAD ($5 WIDE)',
+        title: 'LEG 1 — PUT CREDIT SPREAD ($5 WIDE)',
         rows: [
-          { label: 'Pin target (middle)',          value: FMT_NUM(callWall) },
-          { label: 'Sell call at (short)',          value: FMT_NUM(callWall) },
-          { label: 'Buy call at (long)',            value: FMT_NUM(callWall + W) },
-          { label: 'Spread width',                  value: W + ' pts' },
-          { label: 'Entry trigger',                 value: 'Price > ' + FMT_NUM(callWall) },
+          { label: 'Pin target / close trigger',     value: FMT_NUM(callWall) },
+          { label: 'Sell put at (short)',             value: FMT_NUM(putWall) },
+          { label: 'Buy put at (long / protection)', value: FMT_NUM(putWall - W) },
+          { label: 'Spread width',                    value: W + ' pts' },
+          { label: 'Add Leg 2 when price reaches',    value: FMT_NUM(callWall) },
         ]
       };
     } else {
-      name     = 'PUT SIDE (NEAR WALL)';
-      desc     = 'SPX (' + FMT_NUM(spot) + ') is approaching the Put Wall (' + FMT_NUM(putWall) + ') from above — only ' + Math.round(toPut) + ' pts away. Watch for a confirmed break below ' + FMT_NUM(putWall) + ' to trigger a put-side entry. Strikes shown are ready to execute on breakdown.';
-      cssClass = 'put-side';
+      const nearNote = toPut < 50 ? ' — ' + Math.round(toPut) + ' PTS FROM WALL' : '';
+      name     = 'CALL SPREAD — PUT WALL PIN' + nearNote;
+      desc     = 'SPX (' + FMT_NUM(spot) + ') is between walls and closer to the Put Wall (' + FMT_NUM(putWall) + '). Dealer gamma is pulling price toward the Put Wall. Open Leg 1 now: sell a call credit spread with the short strike at the Call Wall (' + FMT_NUM(callWall) + ') — the structural GEX resistance ceiling that price is unlikely to reclaim. Close for profit (or add Leg 2 put debit spread) when price reaches ' + FMT_NUM(putWall) + '.';
+      cssClass = 'call-side';
       checks   = [
-        { label: 'GEX regime positive',                                        pass: regime === 'positive' },
-        { label: 'Spot above Zero Gamma (' + FMT_NUM(zeroGamma) + ')',         pass: true },
-        { label: 'Approaching Put Wall — ' + Math.round(toPut) + ' pts away',  pass: true },
-        { label: 'Net GEX > +0.1B — wall will hold (' + FMT_GEX(netGex) + ')', pass: strongPos },
-        { label: 'ATM IV > 10% (' + FMT_PCT(iv) + ')',                         pass: iv > 0.10 },
+        { label: 'GEX regime positive',                                           pass: regime === 'positive' },
+        { label: 'Spot above Zero Gamma (' + FMT_NUM(zeroGamma) + ')',            pass: true },
+        { label: 'Put Wall (' + FMT_NUM(putWall) + ') is the pin target',         pass: null },
+        { label: 'Net GEX > +0.1B — walls sticky (' + FMT_GEX(netGex) + ')',     pass: strongPos },
+        { label: 'ATM IV > 10% — enough premium (' + FMT_PCT(iv) + ')',           pass: iv > 0.10 },
       ];
       strikes = {
-        title: 'READY ON BREAKDOWN — PUT CREDIT SPREAD ($5 WIDE)',
+        title: 'LEG 1 — CALL CREDIT SPREAD ($5 WIDE)',
         rows: [
-          { label: 'Pin target (middle)',          value: FMT_NUM(putWall) },
-          { label: 'Sell put at (short)',           value: FMT_NUM(putWall) },
-          { label: 'Buy put at (long)',             value: FMT_NUM(putWall - W) },
-          { label: 'Spread width',                  value: W + ' pts' },
-          { label: 'Entry trigger',                 value: 'Price < ' + FMT_NUM(putWall) },
+          { label: 'Pin target / close trigger',     value: FMT_NUM(putWall) },
+          { label: 'Sell call at (short)',            value: FMT_NUM(callWall) },
+          { label: 'Buy call at (long / protection)', value: FMT_NUM(callWall + W) },
+          { label: 'Spread width',                    value: W + ' pts' },
+          { label: 'Add Leg 2 when price reaches',    value: FMT_NUM(putWall) },
         ]
       };
     }
-
-  // ── Zone 3: Between walls, above Zero Gamma, far from both ───────────────
-  } else {
-    name     = 'BETWEEN WALLS — WAIT';
-    desc     = 'SPX (' + FMT_NUM(spot) + ') is inside the range between Put Wall (' + FMT_NUM(putWall) + ') and Call Wall (' + FMT_NUM(callWall) + '). Dealer hedging is suppressing volatility — no clear butterfly pin target yet. Wait for price to push toward one wall. Iron condor is the better play here, selling premium at both walls simultaneously.';
-    cssClass = 'between';
-    checks   = [
-      { label: 'GEX regime positive — range-bound conditions',              pass: regime === 'positive' },
-      { label: 'Spot above Zero Gamma (' + FMT_NUM(zeroGamma) + ')',        pass: true },
-      { label: 'Price inside walls — no single pin target yet',             pass: null },
-      { label: 'Net GEX > +0.1B — walls defined (' + FMT_GEX(netGex) + ')', pass: strongPos },
-      { label: 'ATM IV > 10% — iron condor viable (' + FMT_PCT(iv) + ')',   pass: iv > 0.10 },
-    ];
-    strikes = {
-      title: 'IRON CONDOR — BOTH WALLS ($5 WIDE)',
-      rows: [
-        { label: 'Sell call at (Call Wall)',   value: FMT_NUM(callWall) },
-        { label: 'Buy call at',                value: FMT_NUM(callWall + W) },
-        { label: 'Sell put at (Put Wall)',      value: FMT_NUM(putWall) },
-        { label: 'Buy put at',                 value: FMT_NUM(putWall - W) },
-        { label: 'Max profit zone',            value: FMT_NUM(putWall) + ' – ' + FMT_NUM(callWall) },
-      ]
-    };
   }
 
   return { name, desc, cssClass, checks, strikes };

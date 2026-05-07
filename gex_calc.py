@@ -108,6 +108,51 @@ def _atm_iv(rows: list[dict], spot: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# ATM straddle expected move (matches TOS calculation)
+# ---------------------------------------------------------------------------
+
+def _atm_straddle_move(rows: list[dict], spot: float, target_dte: int, dte_window: int = 2) -> float:
+    """
+    1-sigma expected move using the ATM straddle price at a given DTE.
+
+    Finds the expiration closest to target_dte, locates the ATM strike,
+    and returns call_mark + put_mark — exactly how TOS computes expected move.
+    Falls back to 0.0 if data is unavailable.
+    """
+    # Filter rows to the target DTE window
+    near = [r for r in rows if abs(r["dte"] - target_dte) <= dte_window]
+    if not near:
+        # Widen window and try again
+        near = [r for r in rows if abs(r["dte"] - target_dte) <= dte_window * 3]
+    if not near:
+        return 0.0
+
+    # Pick the single expiration closest to target_dte
+    best_dte = min(set(r["dte"] for r in near), key=lambda d: abs(d - target_dte))
+    exp_rows = [r for r in near if r["dte"] == best_dte]
+
+    # ATM strike = closest to spot
+    strikes = sorted(set(r["strike"] for r in exp_rows), key=lambda k: abs(k - spot))
+    if not strikes:
+        return 0.0
+    atm_strike = strikes[0]
+
+    atm_rows = [r for r in exp_rows if r["strike"] == atm_strike]
+
+    call_mark = 0.0
+    put_mark  = 0.0
+    for r in atm_rows:
+        mark = (r["bid"] + r["ask"]) / 2.0
+        if r["option_type"] == "CALL":
+            call_mark = mark
+        elif r["option_type"] == "PUT":
+            put_mark  = mark
+
+    straddle = call_mark + put_mark
+    return round(straddle, 3) if straddle > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
 # Core GEX computation
 # ---------------------------------------------------------------------------
 
@@ -192,27 +237,44 @@ def compute_gex_from_rows(rows: list[dict], spot: float) -> dict:
 
 def _find_zero_gamma(by_strike: list[dict], spot: float) -> float:
     """
-    Find the strike where net GEX is closest to zero, giving preference
-    to strikes near spot (within ±5%).
+    Zero Gamma: the price level where cumulative net GEX transitions from
+    negative to positive when scanning strikes low → high.
+
+    Uses the cumulative-sum method: sort all strikes ascending, accumulate
+    net_gex, and interpolate where the running total crosses zero.
+    This matches the methodology used by SpotGamma and similar platforms —
+    it accounts for the balance of the ENTIRE options market, not just
+    the sign of a single strike's GEX.
     """
     if not by_strike:
         return spot
 
-    band = spot * 0.05
-    near = [s for s in by_strike if abs(s["strike"] - spot) <= band]
-    candidates = near if near else by_strike
+    sorted_strikes = sorted(by_strike, key=lambda s: s["strike"])
 
-    # Find where sign changes
-    for i in range(len(candidates) - 1):
-        if candidates[i]["net_gex"] * candidates[i+1]["net_gex"] < 0:
-            # Linear interpolation between the two strikes
-            s1, s2 = candidates[i]["strike"],   candidates[i+1]["strike"]
-            g1, g2 = candidates[i]["net_gex"],  candidates[i+1]["net_gex"]
-            zg = s1 + (s2 - s1) * abs(g1) / (abs(g1) + abs(g2))
+    cumulative      = 0.0
+    prev_cumulative = 0.0
+
+    for i, s in enumerate(sorted_strikes):
+        prev_cumulative = cumulative
+        cumulative += s["net_gex"]
+
+        if i > 0 and prev_cumulative * cumulative < 0:
+            # Cumulative crossed zero between strike[i-1] and strike[i]
+            s1 = sorted_strikes[i - 1]["strike"]
+            s2 = s["strike"]
+            zg = s1 + (s2 - s1) * abs(prev_cumulative) / (abs(prev_cumulative) + abs(cumulative))
             return round(zg, 0)
 
-    # No sign change — return strike with net_gex closest to 0
-    return min(candidates, key=lambda s: abs(s["net_gex"]))["strike"]
+    # No sign change — return the strike where cumulative is closest to zero
+    cumulative  = 0.0
+    best_strike = sorted_strikes[0]["strike"]
+    best_dist   = float("inf")
+    for s in sorted_strikes:
+        cumulative += s["net_gex"]
+        if abs(cumulative) < best_dist:
+            best_dist   = abs(cumulative)
+            best_strike = s["strike"]
+    return best_strike
 
 
 def _empty_snapshot(spot: float) -> dict:
@@ -288,9 +350,11 @@ def compute_gex_snapshot(
 
         snap = compute_gex_from_rows(rows, spot)
 
-        # Add expected moves
-        snap["exp_move_1d"] = expected_move(spot, snap["atm_iv"], 1)
-        snap["exp_move_5d"] = expected_move(spot, snap["atm_iv"], 5)
+        # Add expected moves — use ATM straddle price (matches TOS), fall back to IV formula
+        em_1d = _atm_straddle_move(rows, spot, target_dte=1)
+        em_5d = _atm_straddle_move(rows, spot, target_dte=5)
+        snap["exp_move_1d"] = em_1d if em_1d > 0 else expected_move(spot, snap["atm_iv"], 1)
+        snap["exp_move_5d"] = em_5d if em_5d > 0 else expected_move(spot, snap["atm_iv"], 5)
         snap["symbol"]      = symbol
         snap["timestamp"]   = now_str
         snap["error"]       = None
