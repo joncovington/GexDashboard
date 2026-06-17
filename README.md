@@ -1,6 +1,6 @@
 # SPX GEX Live Dashboard
 
-A real-time Gamma Exposure (GEX) dashboard for SPX options traders. Fetches live option chain data from the Schwab API, computes dealer gamma positioning, and displays key levels with a butterfly spread signal overlay.
+A real-time Gamma Exposure (GEX) dashboard for SPX options traders. Fetches live option chain data and streams real-time quotes via **Schwab** or **tastytrade** (DXLink WebSocket), computes dealer gamma positioning, and displays key levels with a butterfly spread signal overlay.
 
 ---
 
