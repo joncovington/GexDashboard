@@ -40,8 +40,8 @@ Each signal includes a zone-specific entry checklist (regime, Zero Gamma, wall s
 ## Requirements
 
 - Python 3.11+
-- A Schwab developer account with an app that has **Market Data Production** scope
-- The `schwab-py` library and supporting packages (see `requirements.txt`)
+- For Schwab provider: a Schwab developer account with an app that has **Market Data Production** scope
+- For tastytrade provider: a tastytrade brokerage account
 
 Install dependencies:
 
@@ -53,40 +53,51 @@ pip install -r requirements.txt
 
 ## Setup
 
-### 1. Configure credentials
+Credentials are stored securely in **Windows Credential Manager** — no `.env` files needed. On first run, the app prompts for credentials and saves them automatically.
 
-Copy the example env file and fill in your Schwab app credentials:
-
-```bash
-cp .env.example .env
+To update a credential later:
+```python
+import keyring
+keyring.set_password("GexDashboard/Schwab", "client_id", "new_value")
 ```
+Or open **Windows Credential Manager** → Generic Credentials and edit `GexDashboard/Schwab` or `GexDashboard/TastyTrade`.
 
-Edit `.env` with your values:
+### Schwab provider (default)
 
-```
-SCHWAB_CLIENT_ID=your_client_id_here
-SCHWAB_CLIENT_SECRET=your_client_secret_here
-SCHWAB_REDIRECT_URI=https://127.0.0.1:8182
-SCHWAB_TOKEN_PATH=/path/to/your/.schwab_token.json
-```
+#### 1. First run — enter credentials when prompted
 
-You can get your client ID and secret from [developer.schwab.com](https://developer.schwab.com). The redirect URI must match exactly what is registered in your Schwab app settings.
+Start the app and you will be prompted for:
+- **Schwab client ID** and **client secret** — from [developer.schwab.com](https://developer.schwab.com), app with Market Data Production scope
+- **Schwab redirect URI** — must match your app settings, e.g. `https://127.0.0.1:8182`
+- **Schwab token file path** — where to save the OAuth token, e.g. `C:\Users\you\.schwab_token.json`
 
-### 2. Complete OAuth login (first time only)
-
-Run the setup script once to authenticate and save your token:
+#### 2. Complete OAuth login (first time only)
 
 ```bash
 python schwab_market.py --setup
 ```
 
-This opens a browser window for Schwab login. After authorizing, the token is saved to the path you set in `SCHWAB_TOKEN_PATH`. The `schwab-py` library handles token refresh automatically after that.
+This opens a browser window for Schwab login. After authorizing, the token is saved. The `schwab-py` library handles token refresh automatically.
 
-### 3. Run the dashboard
+#### 3. Run the dashboard
 
 ```bash
 python gex_app.py
 ```
+
+### tastytrade provider
+
+#### 1. First run — enter credentials when prompted
+
+Start the app with `--provider tastytrade` and you will be prompted for your tastytrade **username** and **password**. They are stored in Windows Credential Manager under `GexDashboard/TastyTrade`.
+
+#### 2. Run the dashboard
+
+```bash
+python gex_app.py --provider tastytrade --symbol SPX
+```
+
+Note: Use `--symbol SPX` (not `$SPX`) with the tastytrade provider.
 
 Then open your browser to: [http://127.0.0.1:5556](http://127.0.0.1:5556)
 
@@ -96,19 +107,20 @@ Then open your browser to: [http://127.0.0.1:5556](http://127.0.0.1:5556)
 
 | Option | Default | Description |
 |---|---|---|
-| `--symbol` | `$SPX` | Option chain symbol to fetch |
+| `--provider` | `schwab` | Data provider: `schwab` or `tastytrade` |
+| `--symbol` | `$SPX` | Option chain symbol (`$SPX` for Schwab, `SPX` for tastytrade) |
 | `--dte-max` | `30` | Maximum days to expiration to include |
 | `--port` | `5556` | Port to serve the dashboard on |
 | `--host` | `127.0.0.1` | Host to bind to |
-| `--dry-run` | off | Use fake data instead of live Schwab API (useful for UI testing) |
+| `--dry-run` | off | Use fake data (no API calls — useful for UI testing) |
 
-Example with options:
+Example with tastytrade:
 
 ```bash
-python gex_app.py --dte-max 10 --port 8080
+python gex_app.py --provider tastytrade --symbol SPX --dte-max 10
 ```
 
-Dry run for UI testing without a Schwab connection:
+Dry run for UI testing without any API connection:
 
 ```bash
 python gex_app.py --dry-run
@@ -119,27 +131,30 @@ python gex_app.py --dry-run
 ## File Structure
 
 ```
-gex_dashboard/
-├── gex_app.py          # Flask app, dashboard HTML, butterfly signal logic
-├── gex_calc.py         # GEX computation from Schwab option chain data
-├── schwab_market.py    # Schwab API client and OAuth setup
-├── requirements.txt    # Python dependencies
-├── .env.example        # Credential template (copy to .env)
+GexDashboard/
+├── gex_app.py              # Flask app, dashboard HTML, butterfly signal logic
+├── gex_calc.py             # GEX computation (provider-agnostic)
+├── schwab_market.py        # Schwab API client and OAuth setup
+├── tastytrade_market.py    # tastytrade + DXLink WebSocket provider
+├── credentials.py          # Windows Credential Manager helpers
+├── requirements.txt        # Python dependencies
 ├── .gitignore
 ├── data/
-│   └── .gitkeep        # Folder kept in repo; history files written here at runtime
+│   └── .gitkeep            # Folder kept in repo; history files written here at runtime
 └── README.md
 ```
 
 ---
 
-## Token Refresh
+## Token Refresh (Schwab)
 
 Schwab OAuth tokens expire periodically. If the dashboard stops fetching data, re-run the setup script to get a fresh token:
 
 ```bash
 python schwab_market.py --setup
 ```
+
+tastytrade sessions are managed automatically by the `tastytrade` SDK — no manual token refresh required.
 
 ---
 

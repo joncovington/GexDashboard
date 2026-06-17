@@ -131,14 +131,20 @@ def _is_market_hours() -> bool:
 def _fetch_and_update():
     global _current_snap, _history
     try:
+        dte_max  = _args.dte_max  if _args else 30
+        symbol   = _args.symbol   if _args else "$SPX"
+        provider = _args.provider if _args else "schwab"
+
         if _args and _args.dry_run:
             snap = _fake_snapshot()
+        elif provider == "tastytrade":
+            from tastytrade_market import get_session, compute_gex_snapshot_tastytrade
+            session = get_session()
+            snap = compute_gex_snapshot_tastytrade(session, symbol=symbol, dte_max=dte_max)
         else:
             from schwab_market import get_client
             c = get_client()
-            dte_max = _args.dte_max if _args else 30
-            symbol  = _args.symbol  if _args else "SPX"
-            snap    = compute_gex_snapshot(c, symbol=symbol, dte_max=dte_max)
+            snap = compute_gex_snapshot(c, symbol=symbol, dte_max=dte_max)
 
         with _state_lock:
             _current_snap = snap
@@ -500,7 +506,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <footer>
-  SPX GEX Dashboard &bull; Data: Schwab API &bull; Updates every 60s during market hours
+  SPX GEX Dashboard &bull; Updates every 60s during market hours
 </footer>
 
 <script>
@@ -904,15 +910,19 @@ def main():
     global _args
 
     parser = argparse.ArgumentParser(description="SPX GEX Dashboard")
-    parser.add_argument("--symbol",  default="$SPX", help="Option chain symbol (default: $SPX)")
-    parser.add_argument("--dte-max", default=30, type=int, help="Max DTE to include (default: 30)")
-    parser.add_argument("--port",    default=5556, type=int, help="Dashboard port (default: 5556)")
-    parser.add_argument("--host",    default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
-    parser.add_argument("--dry-run", action="store_true", help="Use fake data instead of Schwab API")
+    parser.add_argument("--symbol",   default="$SPX", help="Option chain symbol (default: $SPX)")
+    parser.add_argument("--dte-max",  default=30, type=int, help="Max DTE to include (default: 30)")
+    parser.add_argument("--port",     default=5556, type=int, help="Dashboard port (default: 5556)")
+    parser.add_argument("--host",     default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
+    parser.add_argument("--dry-run",  action="store_true", help="Use fake data (no API calls)")
+    parser.add_argument("--provider", default="schwab", choices=["schwab", "tastytrade"],
+                        help="Market data provider (default: schwab)")
     _args = parser.parse_args()
 
     if _args.dry_run:
         logger.info("[app] DRY-RUN mode -- fake GEX data")
+    else:
+        logger.info("[app] Provider: %s", _args.provider)
 
     # Clean up old history files
     _prune_old_history()
@@ -922,8 +932,8 @@ def main():
     bg.start()
 
     logger.info("[app] SPX GEX Dashboard starting at http://%s:%d", _args.host, _args.port)
-    logger.info("[app] Symbol: %s  DTE max: %d  Auto-refresh: 60s during market hours",
-                _args.symbol, _args.dte_max)
+    logger.info("[app] Provider: %s  Symbol: %s  DTE max: %d  Auto-refresh: 60s during market hours",
+                _args.provider, _args.symbol, _args.dte_max)
 
     app.run(host=_args.host, port=_args.port, debug=False, use_reloader=False)
 

@@ -4,26 +4,20 @@ schwab_market.py — Lightweight Schwab market-data-only client for the GEX dash
 Uses a separate Schwab app registered with "Market Data Production" scope only.
 No account hash, no trading permissions.
 
-Credentials are loaded from gex_dashboard/.env:
-  SCHWAB_CLIENT_ID      — new read-only app key
-  SCHWAB_CLIENT_SECRET  — new read-only app secret
-  SCHWAB_REDIRECT_URI   — https://127.0.0.1:8182
-  SCHWAB_TOKEN_PATH     — path to THIS app's token file (separate from AutoTrading)
+Credentials are stored in Windows Credential Manager under GexDashboard/Schwab.
+On first run, the app prompts for credentials and saves them automatically.
+To update credentials, use:
+  import keyring; keyring.set_password("GexDashboard/Schwab", "client_id", "new_value")
+Or use the Windows Credential Manager UI.
 
-First-time setup — run once to complete OAuth login:
+First-time OAuth setup — run once after entering credentials:
     python schwab_market.py --setup
 """
 
-import os
 import sys
 import logging
 from datetime import date, timedelta
 from pathlib import Path
-
-from dotenv import load_dotenv
-
-# Load THIS folder's .env (not the options_tracker one)
-load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +27,13 @@ try:
 except ImportError:
     raise ImportError("schwab-py is not installed. Run: pip install schwab-py")
 
-CLIENT_ID     = os.getenv("SCHWAB_CLIENT_ID")
-CLIENT_SECRET = os.getenv("SCHWAB_CLIENT_SECRET")
-REDIRECT_URI  = os.getenv("SCHWAB_REDIRECT_URI", "https://127.0.0.1:8182")
-TOKEN_PATH    = os.getenv(
-    "SCHWAB_TOKEN_PATH",
-    str(Path(__file__).parent / "data" / "schwab_token.json"),
-)
+from credentials import get_schwab_credentials
+
+_creds = get_schwab_credentials()
+CLIENT_ID     = _creds["client_id"]
+CLIENT_SECRET = _creds["client_secret"]
+REDIRECT_URI  = _creds["redirect_uri"]
+TOKEN_PATH    = _creds["token_path"]
 
 
 def get_client() -> schwab_client_lib.Client:
@@ -47,11 +41,13 @@ def get_client() -> schwab_client_lib.Client:
     Return an authenticated Schwab client using the saved market-data token.
     Run  python schwab_market.py --setup  once to complete the first OAuth login.
     """
-    if not CLIENT_ID or not CLIENT_SECRET or CLIENT_ID == "YOUR_NEW_CLIENT_ID":
+    if not CLIENT_ID or not CLIENT_SECRET:
         raise ValueError(
-            "GEX dashboard credentials not configured.\n"
-            "Edit gex_dashboard/.env and fill in SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET\n"
-            "from your new Market Data app at developer.schwab.com.\n"
+            "Schwab credentials not found in Windows Credential Manager.\n"
+            "Delete the GexDashboard/Schwab entries and restart to re-enter them,\n"
+            "or set them directly:\n"
+            "  import keyring\n"
+            "  keyring.set_password('GexDashboard/Schwab', 'client_id', 'your_id')\n"
             "Then run:  python schwab_market.py --setup"
         )
 
@@ -111,8 +107,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.setup:
-        if not CLIENT_ID or CLIENT_ID == "YOUR_NEW_CLIENT_ID":
-            print("ERROR: Fill in SCHWAB_CLIENT_ID and SCHWAB_CLIENT_SECRET in gex_dashboard/.env first.")
+        if not CLIENT_ID:
+            print("ERROR: Schwab client_id not found in Windows Credential Manager.")
+            print("       Restart the script to be prompted for credentials.")
             sys.exit(1)
 
         token_dir = Path(TOKEN_PATH).parent

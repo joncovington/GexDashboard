@@ -378,6 +378,58 @@ def compute_gex_snapshot(
 
 
 # ---------------------------------------------------------------------------
+# Provider-agnostic entry point (tastytrade and other non-Schwab providers)
+# ---------------------------------------------------------------------------
+
+def compute_gex_snapshot_from_rows(
+    rows: list[dict],
+    spot: float,
+    symbol: str,
+) -> dict:
+    """
+    Compute a full GEX snapshot from pre-parsed rows and a known spot price.
+
+    Used by non-Schwab providers (e.g. tastytrade) that supply rows directly
+    instead of a Schwab JSON chain. Row format is the same as _parse_chain_to_rows():
+      {strike, option_type, oi, gamma, iv, bid, ask, dte, expiration}
+    """
+    from datetime import datetime
+
+    now_str = datetime.now().isoformat()
+
+    try:
+        if not rows or spot <= 0:
+            snap = _empty_snapshot(spot)
+            snap.update({"symbol": symbol, "timestamp": now_str, "error": "no data"})
+            return snap
+
+        logger.info("[gex] %s  spot=%.2f  rows=%d (external provider)", symbol, spot, len(rows))
+
+        snap = compute_gex_from_rows(rows, spot)
+
+        em_1d = _atm_straddle_move(rows, spot, target_dte=1)
+        em_5d = _atm_straddle_move(rows, spot, target_dte=5)
+        snap["exp_move_1d"] = em_1d if em_1d > 0 else expected_move(spot, snap["atm_iv"], 1)
+        snap["exp_move_5d"] = em_5d if em_5d > 0 else expected_move(spot, snap["atm_iv"], 5)
+        snap["symbol"]      = symbol
+        snap["timestamp"]   = now_str
+        snap["error"]       = None
+
+        logger.info(
+            "[gex] %s  net_gex=%.2fB  regime=%s  call_wall=%.0f  put_wall=%.0f  zero_gamma=%.0f",
+            symbol, snap["total_net_gex_b"], snap["gex_regime"],
+            snap["call_wall"], snap["put_wall"], snap["zero_gamma"],
+        )
+        return snap
+
+    except Exception as e:
+        logger.exception("[gex] Failed to compute GEX for %s: %s", symbol, e)
+        snap = _empty_snapshot(0.0)
+        snap.update({"symbol": symbol, "timestamp": now_str, "error": str(e)})
+        return snap
+
+
+# ---------------------------------------------------------------------------
 # CLI quick-test
 # ---------------------------------------------------------------------------
 
