@@ -152,6 +152,7 @@ def _fetch_and_update():
                 _history.append({
                     "timestamp": snap["timestamp"],
                     "net_gex_b": snap["total_net_gex_b"],
+                    "spot":      snap.get("spot", 0),
                 })
                 # Keep only today's data
                 today = date.today().isoformat()
@@ -192,26 +193,38 @@ def _fake_snapshot() -> dict:
     by_strike = []
     for k in strikes:
         dist = (k - spot) / spot
-        call_gex = max(0, (1 - abs(dist + 0.01) * 20) * 5e8 + random.uniform(-5e7, 5e7))
-        put_gex  = max(0, (1 - abs(dist - 0.01) * 20) * 5e8 + random.uniform(-5e7, 5e7))
-        by_strike.append({"strike": k, "call_gex": call_gex, "put_gex": put_gex,
-                           "net_gex": call_gex - put_gex})
-    total = sum(s["net_gex"] for s in by_strike)
+        call_gex     = max(0, (1 - abs(dist + 0.01) * 20) * 5e8 + random.uniform(-5e7, 5e7))
+        put_gex      = max(0, (1 - abs(dist - 0.01) * 20) * 5e8 + random.uniform(-5e7, 5e7))
+        call_vol_gex = call_gex * random.uniform(0.3, 0.7)
+        put_vol_gex  = put_gex  * random.uniform(0.3, 0.7)
+        by_strike.append({
+            "strike":       k,
+            "call_gex":     call_gex,
+            "put_gex":      put_gex,
+            "net_gex":      call_gex - put_gex,
+            "call_vol_gex": call_vol_gex,
+            "put_vol_gex":  put_vol_gex,
+            "net_vol_gex":  call_vol_gex - put_vol_gex,
+        })
+    total     = sum(s["net_gex"]     for s in by_strike)
+    total_vol = sum(s["net_vol_gex"] for s in by_strike)
     return {
-        "symbol":          "SPX",
-        "spot":             round(spot, 2),
-        "total_net_gex":    round(total, 2),
-        "total_net_gex_b":  round(total / 1e9, 3),
-        "by_strike":        by_strike,
-        "call_wall":        spot + 50,
-        "put_wall":         spot - 50,
-        "zero_gamma":       spot + 10,
-        "gex_regime":       "positive" if total > 0 else "negative",
-        "atm_iv":           0.142,
-        "exp_move_1d":      round(spot * 0.142 * math.sqrt(1/365), 1),
-        "exp_move_5d":      round(spot * 0.142 * math.sqrt(5/365), 1),
-        "timestamp":        datetime.now().isoformat(),
-        "error":            None,
+        "symbol":               "SPX",
+        "spot":                  round(spot, 2),
+        "total_net_gex":         round(total, 2),
+        "total_net_gex_b":       round(total / 1e9, 3),
+        "total_net_vol_gex":     round(total_vol, 2),
+        "total_net_vol_gex_b":   round(total_vol / 1e9, 3),
+        "by_strike":             by_strike,
+        "call_wall":             spot + 50,
+        "put_wall":              spot - 50,
+        "zero_gamma":            spot + 10,
+        "gex_regime":            "positive" if total > 0 else "negative",
+        "atm_iv":                0.142,
+        "exp_move_1d":           round(spot * 0.142 * math.sqrt(1/365), 1),
+        "exp_move_5d":           round(spot * 0.142 * math.sqrt(5/365), 1),
+        "timestamp":             datetime.now().isoformat(),
+        "error":                 None,
     }
 
 
@@ -245,6 +258,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SPX GEX Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
 <style>
   :root {
     --bg:       #0d0d0d;
@@ -391,6 +405,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     text-align: center; color: var(--muted); font-size: 10px;
     padding: 12px; border-top: 1px solid var(--border);
   }
+
+  .ladder-toggle {
+    background: var(--border); border: 1px solid #444; color: var(--muted);
+    padding: 3px 10px; border-radius: 3px; cursor: pointer; font-family: inherit;
+    font-size: 11px; margin-left: 4px;
+  }
+  .ladder-toggle.active { background: #1a2e1a; color: var(--green); border-color: var(--green); }
 </style>
 </head>
 <body>
@@ -462,13 +483,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <!-- Charts -->
 <div class="charts-row">
-  <div class="chart-card" style="flex:2; min-width:400px;">
-    <div class="chart-title">GEX BY STRIKE  (call = green, put = orange, net = white line)</div>
-    <div class="chart-wrap"><canvas id="gex-bar-chart"></canvas></div>
+  <div class="chart-card" style="flex:1; min-width:280px;">
+    <div class="chart-title">INTRADAY SPOT PRICE</div>
+    <div class="chart-wrap"><canvas id="spot-line-chart"></canvas></div>
   </div>
-  <div class="chart-card" style="flex:1; min-width:260px;">
-    <div class="chart-title">INTRADAY NET GEX  ($B)</div>
-    <div class="chart-wrap"><canvas id="gex-line-chart"></canvas></div>
+  <div class="chart-card" style="flex:1; min-width:280px;">
+    <div class="chart-title" style="display:flex; justify-content:space-between; align-items:center;">
+      <span>GEX LADDER  (call ▶ right, put ◀ left)</span>
+      <span>
+        <button id="ladder-oi-btn"  class="ladder-toggle active">OI</button>
+        <button id="ladder-vol-btn" class="ladder-toggle">VOL</button>
+      </span>
+    </div>
+    <div class="chart-wrap"><canvas id="gex-ladder-chart"></canvas></div>
   </div>
 </div>
 
@@ -520,90 +547,126 @@ const FMT_GEX  = v => {
   return (b >= 0 ? '+' : '') + (b * 1000).toFixed(1) + 'M';
 };
 
-let barChart  = null;
-let lineChart = null;
-let autoTimer = null;
+let spotChart   = null;
+let ladderChart = null;
+let autoTimer   = null;
+let ladderMode  = 'oi';   // 'oi' | 'vol'
+let lastSnap    = null;
+
+const FMT_GEX_AXIS = v => {
+  if (v == null) return '';
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return (v/1e9).toFixed(1) + 'B';
+  if (abs >= 1e6) return (v/1e6).toFixed(0) + 'M';
+  return (v/1e3).toFixed(0) + 'K';
+};
+
+function _buildLevelAnnotations(snap) {
+  if (!snap) return {};
+  const mkLine = (y, color, dash) => ({
+    type: 'line', yMin: y, yMax: y,
+    borderColor: color, borderWidth: dash ? 1 : 1.5,
+    borderDash: dash || [],
+  });
+  return {
+    spotLine:      mkLine(snap.spot,       'rgba(255,255,255,0.85)', null),
+    callWallLine:  mkLine(snap.call_wall,  'rgba(0,200,83,0.75)',    [5,4]),
+    putWallLine:   mkLine(snap.put_wall,   'rgba(255,87,34,0.75)',   [5,4]),
+    zeroGammaLine: mkLine(snap.zero_gamma, 'rgba(255,214,0,0.75)',   [5,4]),
+  };
+}
 
 function initCharts() {
-  const barCtx  = document.getElementById('gex-bar-chart').getContext('2d');
-  const lineCtx = document.getElementById('gex-line-chart').getContext('2d');
-
-  barChart = new Chart(barCtx, {
-    type: 'bar',
-    data: { labels: [], datasets: [
-      { label: 'Call GEX', data: [], backgroundColor: 'rgba(0,200,83,0.5)', yAxisID: 'y' },
-      { label: 'Put GEX',  data: [], backgroundColor: 'rgba(255,87,34,0.5)',  yAxisID: 'y' },
-      { label: 'Net GEX',  data: [], type: 'line', borderColor: 'rgba(255,255,255,0.9)',
-        borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'y' },
-    ]},
-    options: {
-      responsive: true, maintainAspectRatio: false, animation: false,
-      plugins: { legend: { labels: { color: '#aaa', font: { size: 10 } } } },
-      scales: {
-        x: { ticks: { color: '#666', maxTicksLimit: 12, font: { size: 9 } }, grid: { color: '#222' } },
-        y: { ticks: { color: '#666', font: { size: 9 },
-               callback: v => Math.abs(v) >= 1e9 ? (v/1e9).toFixed(1)+'B' : (v/1e6).toFixed(0)+'M' },
-             grid: { color: '#222' } },
-      }
-    }
-  });
-
-  lineChart = new Chart(lineCtx, {
+  // ── Intraday spot price ──────────────────────────────────────────────────
+  spotChart = new Chart(
+    document.getElementById('spot-line-chart').getContext('2d'), {
     type: 'line',
-    data: { labels: [], datasets: [
-      {
-        label: 'Net GEX ($B)', data: [],
-        borderColor: 'rgba(0,200,83,0.9)', borderWidth: 2,
-        pointRadius: 0, fill: true,
-        backgroundColor: 'rgba(0,200,83,0.06)',
-        pointBackgroundColor: 'rgba(0,200,83,0.9)',
-      },
-      {
-        label: '+0.1B', data: [],
-        borderColor: 'rgba(0,200,83,0.5)', borderWidth: 1,
-        borderDash: [4, 4], pointRadius: 0, fill: false,
-      },
-      {
-        label: '-0.1B', data: [],
-        borderColor: 'rgba(255,23,68,0.5)', borderWidth: 1,
-        borderDash: [4, 4], pointRadius: 0, fill: false,
-      },
-    ]},
+    data: { labels: [], datasets: [{
+      label: 'Spot', data: [],
+      borderColor: 'rgba(0,200,255,0.9)', borderWidth: 1.5,
+      pointRadius: 0, fill: false,
+    }]},
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: { legend: { display: false } },
       scales: {
         x: { ticks: { color: '#555', maxTicksLimit: 6, font: { size: 9 } }, grid: { color: '#1a1a1a' } },
-        y: { ticks: { color: '#555', font: { size: 9 },
-               callback: v => v.toFixed(2) + 'B' },
-             grid: { color: '#1a1a1a' },
-             position: 'right' },
+        y: { position: 'right',
+             ticks: { color: '#666', font: { size: 9 },
+               callback: v => v.toLocaleString('en-US', {maximumFractionDigits: 0}) },
+             grid: { color: '#1a1a1a' } },
       }
     }
   });
+
+  // ── GEX ladder histogram ─────────────────────────────────────────────────
+  ladderChart = new Chart(
+    document.getElementById('gex-ladder-chart').getContext('2d'), {
+    type: 'bar',
+    data: { labels: [], datasets: [
+      { label: 'Call GEX', data: [], backgroundColor: 'rgba(0,200,83,0.55)',
+        borderColor: 'rgba(0,200,83,0.8)', borderWidth: 0.5 },
+      { label: 'Put GEX',  data: [], backgroundColor: 'rgba(255,87,34,0.55)',
+        borderColor: 'rgba(255,87,34,0.8)', borderWidth: 0.5 },
+    ]},
+    options: {
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        annotation: { annotations: {} },
+      },
+      scales: {
+        x: {
+          stacked: false,
+          ticks: { color: '#555', font: { size: 9 }, callback: FMT_GEX_AXIS },
+          grid:  { color: '#222' },
+        },
+        y: {
+          stacked: false,
+          ticks: { color: '#666', font: { size: 9 } },
+          grid:  { color: '#1a1a1a' },
+        },
+      }
+    }
+  });
+
+  // Toggle buttons
+  document.getElementById('ladder-oi-btn').onclick  = () => setLadderMode('oi');
+  document.getElementById('ladder-vol-btn').onclick = () => setLadderMode('vol');
+}
+
+function setLadderMode(mode) {
+  ladderMode = mode;
+  document.getElementById('ladder-oi-btn').classList.toggle('active',  mode === 'oi');
+  document.getElementById('ladder-vol-btn').classList.toggle('active', mode === 'vol');
+  if (lastSnap) updateCharts(lastSnap);
 }
 
 function updateCharts(snap) {
   if (!snap || !snap.by_strike) return;
 
-  // Filter to strikes within +/-150 points of spot
-  const spot   = snap.spot || 0;
-  const strikes = snap.by_strike.filter(s => Math.abs(s.strike - spot) <= 150);
-
-  barChart.data.labels   = strikes.map(s => s.strike);
-  barChart.data.datasets[0].data = strikes.map(s => s.call_gex);
-  barChart.data.datasets[1].data = strikes.map(s => s.put_gex);
-  barChart.data.datasets[2].data = strikes.map(s => s.net_gex);
-  barChart.update('none');
-
-  // Intraday line
+  // ── Spot price history ───────────────────────────────────────────────────
   const hist = snap.history || [];
-  const labels = hist.map(h => h.timestamp.substring(11, 16));
-  lineChart.data.labels = labels;
-  lineChart.data.datasets[0].data = hist.map(h => h.net_gex_b);
-  lineChart.data.datasets[1].data = labels.map(() => 0.1);
-  lineChart.data.datasets[2].data = labels.map(() => -0.1);
-  lineChart.update('none');
+  spotChart.data.labels            = hist.map(h => h.timestamp.substring(11, 16));
+  spotChart.data.datasets[0].data  = hist.map(h => h.spot);
+  spotChart.update('none');
+
+  // ── GEX ladder — ±150 pts of spot, sorted descending (high strike at top) ─
+  const spot = snap.spot || 0;
+  const strikes = snap.by_strike
+    .filter(s => Math.abs(s.strike - spot) <= 150)
+    .sort((a, b) => b.strike - a.strike);
+
+  const callKey = ladderMode === 'vol' ? 'call_vol_gex' : 'call_gex';
+  const putKey  = ladderMode === 'vol' ? 'put_vol_gex'  : 'put_gex';
+
+  ladderChart.data.labels            = strikes.map(s => s.strike);
+  ladderChart.data.datasets[0].data  = strikes.map(s =>  s[callKey]);   // positive → right
+  ladderChart.data.datasets[1].data  = strikes.map(s => -s[putKey]);    // negative → left
+
+  ladderChart.options.plugins.annotation.annotations = _buildLevelAnnotations(snap);
+  ladderChart.update('none');
 }
 
 function updateKpis(snap) {
@@ -858,6 +921,7 @@ async function fetchGex() {
     const resp = await fetch('/api/gex');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const snap = await resp.json();
+    lastSnap = snap;
     updateKpis(snap);
     updateCharts(snap);
     updateSignal(snap);

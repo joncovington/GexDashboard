@@ -44,12 +44,13 @@ async def _fetch_gex_rows(
     """
     Returns (rows, spot_price).
 
-    Each row: {strike, option_type, oi, gamma, iv, bid, ask, dte, expiration}
+    Each row: {strike, option_type, oi, volume, gamma, iv, bid, ask, dte, expiration}
     — same field names as _parse_chain_to_rows() in gex_calc.py.
     """
     from tastytrade import DXLinkStreamer
     from tastytrade.dxfeed import Quote, Greeks
     from tastytrade.instruments import NestedOptionChain
+    from tastytrade.market_data import get_market_data_by_type
 
     # ── 1. Fetch option chain ──────────────────────────────────────────────────
     logger.info("[tastytrade] Fetching option chain for %s (DTE %d–%d)", symbol, dte_min, dte_max)
@@ -135,7 +136,26 @@ async def _fetch_gex_rows(
 
     logger.info("[tastytrade] Greeks received for %d / %d option symbols", len(greeks_map), len(streamer_symbols))
 
-    # ── 3. Build rows ──────────────────────────────────────────────────────────
+    # ── 3. Bulk-fetch OI + day volume via REST (batches of 100) ───────────────
+    async def _fetch_market_data(syms: list[str]) -> dict[str, object]:
+        batches = [syms[i:i + 100] for i in range(0, len(syms), 100)]
+        results = await asyncio.gather(
+            *[get_market_data_by_type(session, options=batch) for batch in batches],
+            return_exceptions=True,
+        )
+        md_map = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("[tastytrade] Market-data batch failed: %s", result)
+                continue
+            for md in result:
+                md_map[md.symbol] = md
+        return md_map
+
+    md_map = await _fetch_market_data(streamer_symbols)
+    logger.info("[tastytrade] Market data received for %d / %d symbols", len(md_map), len(streamer_symbols))
+
+    # ── 4. Build rows ──────────────────────────────────────────────────────────
     rows = []
     for opt in all_options:
         sym = opt["streamer_symbol"]
@@ -147,16 +167,11 @@ async def _fetch_gex_rows(
         iv    = float(g.volatility) if g.volatility is not None else 0.0
         mark  = float(g.price) if g.price is not None else 0.0
 
-        # OI not available directly from Greeks; tastytrade REST market-data
-        # endpoint can provide it but requires per-symbol calls — expensive for
-        # 200+ strikes. Use a default of 0 and let the caller filter.
-        # Contracts with oi=0 will still have gamma contribution via mark/greeks
-        # but will be filtered out by gex_calc (oi <= 0 skipped).
-        # We set oi=1 as a placeholder so gamma-positive contracts are included;
-        # actual OI weighting is lost but relative GEX profile is preserved.
-        oi = 1  # placeholder — see comment above
+        md = md_map.get(sym)
+        oi     = int(md.open_interest or 0) if md else 1  # fallback to 1 so row isn't filtered
+        volume = int(md.volume or 0)         if md else 0
 
-        if gamma <= 0:
+        if gamma <= 0 or oi <= 0:
             continue
 
         rows.append({
@@ -165,9 +180,10 @@ async def _fetch_gex_rows(
             "strike":      opt["strike"],
             "option_type": opt["option_type"],
             "oi":          oi,
+            "volume":      volume,
             "gamma":       gamma,
             "iv":          iv,
-            "bid":         mark * 0.99,  # approximate bid/ask from mark
+            "bid":         mark * 0.99,
             "ask":         mark * 1.01,
         })
 

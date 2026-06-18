@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 def _parse_chain_to_rows(chain: dict) -> list[dict]:
     """
     Flatten a Schwab option chain JSON into a list of per-strike dicts.
-    Each row: { expiration, dte, strike, option_type, oi, gamma, iv, bid, ask }
+    Each row: { expiration, dte, strike, option_type, oi, volume, gamma, iv, bid, ask }
     Only includes contracts with gamma > 0 and OI > 0.
     """
     rows = []
@@ -64,6 +64,7 @@ def _parse_chain_to_rows(chain: dict) -> list[dict]:
 
                 for c in contracts:
                     oi     = c.get("openInterest", 0) or 0
+                    volume = c.get("totalVolume", 0) or 0
                     gamma  = c.get("gamma", 0.0) or 0.0
                     iv     = c.get("volatility", 0.0) or 0.0
                     bid    = c.get("bid", 0.0) or 0.0
@@ -78,6 +79,7 @@ def _parse_chain_to_rows(chain: dict) -> list[dict]:
                         "strike":      strike,
                         "option_type": opt_type,
                         "oi":          oi,
+                        "volume":      volume,
                         "gamma":       gamma,
                         "iv":          iv / 100.0,   # Schwab returns as percent
                         "bid":         bid,
@@ -178,28 +180,36 @@ def compute_gex_from_rows(rows: list[dict], spot: float) -> dict:
     for r in rows:
         k = r["strike"]
         if k not in strike_data:
-            strike_data[k] = {"call_gex": 0.0, "put_gex": 0.0}
+            strike_data[k] = {"call_gex": 0.0, "put_gex": 0.0,
+                               "call_vol_gex": 0.0, "put_vol_gex": 0.0}
 
-        gex_val = r["oi"] * r["gamma"] * spot * 100
+        gex_val     = r["oi"]                   * r["gamma"] * spot * 100
+        vol_gex_val = r.get("volume", 0)        * r["gamma"] * spot * 100
 
         if r["option_type"] == "CALL":
-            strike_data[k]["call_gex"] += gex_val
+            strike_data[k]["call_gex"]     += gex_val
+            strike_data[k]["call_vol_gex"] += vol_gex_val
         else:
-            strike_data[k]["put_gex"]  += gex_val
+            strike_data[k]["put_gex"]      += gex_val
+            strike_data[k]["put_vol_gex"]  += vol_gex_val
 
     # Build sorted list
     by_strike = []
     for k in sorted(strike_data.keys()):
         d = strike_data[k]
         by_strike.append({
-            "strike":   k,
-            "call_gex": round(d["call_gex"], 2),
-            "put_gex":  round(d["put_gex"],  2),
-            "net_gex":  round(d["call_gex"] - d["put_gex"], 2),
+            "strike":       k,
+            "call_gex":     round(d["call_gex"],     2),
+            "put_gex":      round(d["put_gex"],      2),
+            "net_gex":      round(d["call_gex"] - d["put_gex"], 2),
+            "call_vol_gex": round(d["call_vol_gex"], 2),
+            "put_vol_gex":  round(d["put_vol_gex"],  2),
+            "net_vol_gex":  round(d["call_vol_gex"] - d["put_vol_gex"], 2),
         })
 
-    # Total net GEX
-    total_net_gex = sum(s["net_gex"] for s in by_strike)
+    # Totals
+    total_net_gex     = sum(s["net_gex"]     for s in by_strike)
+    total_net_vol_gex = sum(s["net_vol_gex"] for s in by_strike)
 
     # Call Wall — strike with max call GEX
     call_wall = max(by_strike, key=lambda s: s["call_gex"])["strike"] if by_strike else spot
@@ -223,15 +233,17 @@ def compute_gex_from_rows(rows: list[dict], spot: float) -> dict:
     atm_iv_val = _atm_iv(rows, spot)
 
     return {
-        "total_net_gex":  round(total_net_gex, 2),
-        "total_net_gex_b": round(total_net_gex / 1e9, 3),  # in billions
-        "by_strike":      by_strike,
-        "call_wall":      call_wall,
-        "put_wall":       put_wall,
-        "zero_gamma":     zero_gamma,
-        "gex_regime":     regime,
-        "atm_iv":         round(atm_iv_val, 4),
-        "spot":           spot,
+        "total_net_gex":      round(total_net_gex, 2),
+        "total_net_gex_b":    round(total_net_gex / 1e9, 3),
+        "total_net_vol_gex":  round(total_net_vol_gex, 2),
+        "total_net_vol_gex_b": round(total_net_vol_gex / 1e9, 3),
+        "by_strike":          by_strike,
+        "call_wall":          call_wall,
+        "put_wall":           put_wall,
+        "zero_gamma":         zero_gamma,
+        "gex_regime":         regime,
+        "atm_iv":             round(atm_iv_val, 4),
+        "spot":               spot,
     }
 
 
@@ -279,15 +291,17 @@ def _find_zero_gamma(by_strike: list[dict], spot: float) -> float:
 
 def _empty_snapshot(spot: float) -> dict:
     return {
-        "total_net_gex":   0.0,
-        "total_net_gex_b": 0.0,
-        "by_strike":       [],
-        "call_wall":       spot,
-        "put_wall":        spot,
-        "zero_gamma":      spot,
-        "gex_regime":      "neutral",
-        "atm_iv":          0.0,
-        "spot":            spot,
+        "total_net_gex":       0.0,
+        "total_net_gex_b":     0.0,
+        "total_net_vol_gex":   0.0,
+        "total_net_vol_gex_b": 0.0,
+        "by_strike":           [],
+        "call_wall":           spot,
+        "put_wall":            spot,
+        "zero_gamma":          spot,
+        "gex_regime":          "neutral",
+        "atm_iv":              0.0,
+        "spot":                spot,
     }
 
 
