@@ -208,6 +208,14 @@ def _fake_snapshot() -> dict:
         })
     total     = sum(s["net_gex"]     for s in by_strike)
     total_vol = sum(s["net_vol_gex"] for s in by_strike)
+    iv_by_strike = []
+    for k in strikes[::3]:
+        dist = (k - spot) / spot
+        iv_by_strike.append({
+            "strike":  k,
+            "call_iv": round(0.14 + dist * 0.15 + random.uniform(-0.005, 0.005), 4),
+            "put_iv":  round(0.15 - dist * 0.20 + random.uniform(-0.005, 0.005), 4),
+        })
     return {
         "symbol":               "SPX",
         "spot":                  round(spot, 2),
@@ -216,6 +224,8 @@ def _fake_snapshot() -> dict:
         "total_net_vol_gex":     round(total_vol, 2),
         "total_net_vol_gex_b":   round(total_vol / 1e9, 3),
         "by_strike":             by_strike,
+        "iv_by_strike":          iv_by_strike,
+        "nearest_dte":           1,
         "call_wall":             spot + 50,
         "put_wall":              spot - 50,
         "zero_gamma":            spot + 10,
@@ -293,11 +303,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge-negative { background: #330000; color: var(--red);   border: 1px solid var(--red);   }
   .badge-neutral  { background: #222200; color: var(--yellow);border: 1px solid var(--yellow);}
 
-  #status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  #status-dot.live { background: var(--green); animation: pulse 2s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-
-  #last-update { color: var(--muted); font-size: 11px; }
+  #refresh-indicator {
+    display: flex; flex-direction: column; align-items: flex-end;
+    gap: 3px; min-width: 120px;
+  }
+  #refresh-text { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  #refresh-bar-wrap {
+    width: 120px; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
+  }
+  #refresh-bar {
+    height: 100%; width: 100%;
+    background: var(--green);
+    transition: width 0.5s linear, background-color 0.5s linear;
+  }
 
   button#refresh-btn {
     background: var(--border); border: 1px solid #444; color: var(--text);
@@ -419,8 +437,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <header>
   <h1>&#9650; SPX GEX</h1>
   <div class="header-right">
-    <div id="status-dot"></div>
-    <span id="last-update">--</span>
+    <div id="refresh-indicator">
+      <span id="refresh-text">--</span>
+      <div id="refresh-bar-wrap"><div id="refresh-bar"></div></div>
+    </div>
     <div id="regime-badge" class="badge-neutral">NEUTRAL</div>
     <button id="refresh-btn" onclick="manualRefresh()">&#8635; Refresh</button>
   </div>
@@ -488,11 +508,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="chart-wrap"><canvas id="spot-line-chart"></canvas></div>
   </div>
   <div class="chart-card" style="flex:1; min-width:280px;">
-    <div class="chart-title" style="display:flex; justify-content:space-between; align-items:center;">
-      <span>GEX LADDER  (call ▶ right, put ◀ left)</span>
-      <span>
-        <button id="ladder-oi-btn"  class="ladder-toggle active">OI</button>
-        <button id="ladder-vol-btn" class="ladder-toggle">VOL</button>
+    <div class="chart-title" id="iv-skew-title">IV SKEW</div>
+    <div class="chart-wrap" style="height:120px;"><canvas id="iv-skew-chart"></canvas></div>
+  </div>
+  <div class="chart-card" style="flex:1; min-width:280px;">
+    <div class="chart-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+      <span>GEX LADDER</span>
+      <span style="display:flex; gap:8px; align-items:center;">
+        <span style="display:flex;">
+          <button id="ladder-oi-btn"  class="ladder-toggle active">OI</button>
+          <button id="ladder-vol-btn" class="ladder-toggle">VOL</button>
+        </span>
+        <span style="color:#444">|</span>
+        <span style="display:flex;">
+          <button id="ladder-view-cvp-btn" class="ladder-toggle active">C v P</button>
+          <button id="ladder-view-net-btn" class="ladder-toggle">NET</button>
+          <button id="ladder-view-abs-btn" class="ladder-toggle">|NET|</button>
+        </span>
       </span>
     </div>
     <div class="chart-wrap"><canvas id="gex-ladder-chart"></canvas></div>
@@ -549,9 +581,16 @@ const FMT_GEX  = v => {
 
 let spotChart   = null;
 let ladderChart = null;
+let ivSkewChart = null;
 let autoTimer   = null;
-let ladderMode  = 'oi';   // 'oi' | 'vol'
+let ladderMode  = 'oi';    // 'oi' | 'vol'
+let ladderView  = 'cvp';   // 'cvp' | 'net' | 'abs'
 let lastSnap    = null;
+
+// Countdown indicator state
+const REFRESH_INTERVAL_MS = 60000;
+let lastFetchTime = Date.now();
+let countdownTimer = null;
 
 const FMT_GEX_AXIS = v => {
   if (v == null) return '';
@@ -631,9 +670,34 @@ function initCharts() {
     }
   });
 
-  // Toggle buttons
+  // ── IV skew chart ─────────────────────────────────────────────────────────
+  ivSkewChart = new Chart(
+    document.getElementById('iv-skew-chart').getContext('2d'), {
+    type: 'line',
+    data: { labels: [], datasets: [
+      { label: 'Call IV', data: [], borderColor: 'rgba(0,200,83,0.85)',  borderWidth: 1.2, pointRadius: 0, fill: false },
+      { label: 'Put IV',  data: [], borderColor: 'rgba(255,87,34,0.85)', borderWidth: 1.2, pointRadius: 0, fill: false },
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { labels: { color: '#aaa', font: { size: 9 }, boxWidth: 10 } } },
+      scales: {
+        x: { ticks: { color: '#555', maxTicksLimit: 8, font: { size: 9 } }, grid: { color: '#1a1a1a' } },
+        y: { position: 'right',
+             ticks: { color: '#666', font: { size: 9 }, callback: v => (v*100).toFixed(0)+'%' },
+             grid: { color: '#1a1a1a' } },
+      }
+    }
+  });
+
+  // Weighting toggle (OI vs VOL)
   document.getElementById('ladder-oi-btn').onclick  = () => setLadderMode('oi');
   document.getElementById('ladder-vol-btn').onclick = () => setLadderMode('vol');
+
+  // View mode toggle (CvP vs Net vs |Net|)
+  document.getElementById('ladder-view-cvp-btn').onclick = () => setLadderView('cvp');
+  document.getElementById('ladder-view-net-btn').onclick = () => setLadderView('net');
+  document.getElementById('ladder-view-abs-btn').onclick = () => setLadderView('abs');
 }
 
 function setLadderMode(mode) {
@@ -641,6 +705,35 @@ function setLadderMode(mode) {
   document.getElementById('ladder-oi-btn').classList.toggle('active',  mode === 'oi');
   document.getElementById('ladder-vol-btn').classList.toggle('active', mode === 'vol');
   if (lastSnap) updateCharts(lastSnap);
+}
+
+function setLadderView(view) {
+  ladderView = view;
+  document.getElementById('ladder-view-cvp-btn').classList.toggle('active', view === 'cvp');
+  document.getElementById('ladder-view-net-btn').classList.toggle('active', view === 'net');
+  document.getElementById('ladder-view-abs-btn').classList.toggle('active', view === 'abs');
+  // Rebuild dataset configuration when switching views
+  _applyLadderViewConfig();
+  if (lastSnap) updateCharts(lastSnap);
+}
+
+function _applyLadderViewConfig() {
+  // Per-view dataset visibility/colors. Datasets are always 2:
+  //   [0] = calls (positive) or net-positive or abs
+  //   [1] = puts (negative) or net-negative
+  const ds = ladderChart.data.datasets;
+  if (ladderView === 'cvp') {
+    ds[0].label = 'Call GEX'; ds[0].backgroundColor = 'rgba(0,200,83,0.55)';
+    ds[1].label = 'Put GEX';  ds[1].backgroundColor = 'rgba(255,87,34,0.55)';
+    ds[1].hidden = false;
+  } else if (ladderView === 'net') {
+    ds[0].label = 'Net GEX (call-heavy)'; ds[0].backgroundColor = 'rgba(0,200,83,0.55)';
+    ds[1].label = 'Net GEX (put-heavy)';  ds[1].backgroundColor = 'rgba(255,87,34,0.55)';
+    ds[1].hidden = false;
+  } else { // 'abs'
+    ds[0].label = '|Net GEX|'; ds[0].backgroundColor = 'rgba(33,150,243,0.55)';
+    ds[1].hidden = true;
+  }
 }
 
 function updateCharts(snap) {
@@ -660,13 +753,36 @@ function updateCharts(snap) {
 
   const callKey = ladderMode === 'vol' ? 'call_vol_gex' : 'call_gex';
   const putKey  = ladderMode === 'vol' ? 'put_vol_gex'  : 'put_gex';
+  const netKey  = ladderMode === 'vol' ? 'net_vol_gex'  : 'net_gex';
 
-  ladderChart.data.labels            = strikes.map(s => s.strike);
-  ladderChart.data.datasets[0].data  = strikes.map(s =>  s[callKey]);   // positive → right
-  ladderChart.data.datasets[1].data  = strikes.map(s => -s[putKey]);    // negative → left
+  ladderChart.data.labels = strikes.map(s => s.strike);
+
+  if (ladderView === 'cvp') {
+    // Calls right (positive), puts left (negative)
+    ladderChart.data.datasets[0].data = strikes.map(s =>  s[callKey]);
+    ladderChart.data.datasets[1].data = strikes.map(s => -s[putKey]);
+  } else if (ladderView === 'net') {
+    // Single bar per strike: positive net → right (green ds), negative → left (red ds)
+    ladderChart.data.datasets[0].data = strikes.map(s => s[netKey] > 0 ? s[netKey] : 0);
+    ladderChart.data.datasets[1].data = strikes.map(s => s[netKey] < 0 ? s[netKey] : 0);
+  } else {
+    // |Net| magnitude only on dataset 0
+    ladderChart.data.datasets[0].data = strikes.map(s => Math.abs(s[netKey]));
+    ladderChart.data.datasets[1].data = [];
+  }
 
   ladderChart.options.plugins.annotation.annotations = _buildLevelAnnotations(snap);
   ladderChart.update('none');
+
+  // ── IV skew ──────────────────────────────────────────────────────────────
+  const ivRows = (snap.iv_by_strike || []).filter(r => Math.abs(r.strike - spot) <= 150);
+  ivSkewChart.data.labels = ivRows.map(r => r.strike);
+  ivSkewChart.data.datasets[0].data = ivRows.map(r => r.call_iv);
+  ivSkewChart.data.datasets[1].data = ivRows.map(r => r.put_iv);
+  ivSkewChart.update('none');
+
+  const dteLabel = snap.nearest_dte != null ? ' — ' + snap.nearest_dte + ' DTE' : '';
+  document.getElementById('iv-skew-title').textContent = 'IV SKEW' + dteLabel;
 }
 
 function updateKpis(snap) {
@@ -696,11 +812,7 @@ function updateKpis(snap) {
   const gexEl = document.getElementById('kpi-gex');
   gexEl.style.color = snap.total_net_gex_b >= 0 ? 'var(--green)' : 'var(--red)';
 
-  // Last update
-  if (snap.timestamp) {
-    const t = snap.timestamp.substring(11, 19);
-    document.getElementById('last-update').textContent = t + ' ET';
-  }
+  // (Last-update timestamp now shown via refresh countdown text)
 
   // Error banner
   const banner = document.getElementById('error-banner');
@@ -922,13 +1034,12 @@ async function fetchGex() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const snap = await resp.json();
     lastSnap = snap;
+    lastFetchTime = Date.now();
     updateKpis(snap);
     updateCharts(snap);
     updateSignal(snap);
-    document.getElementById('status-dot').className = 'live';
   } catch(e) {
     console.error('GEX fetch error:', e);
-    document.getElementById('status-dot').className = '';
   }
 }
 
@@ -948,13 +1059,40 @@ async function manualRefresh() {
 
 function startAutoRefresh() {
   if (autoTimer) clearInterval(autoTimer);
-  autoTimer = setInterval(fetchGex, 60000);
+  autoTimer = setInterval(fetchGex, REFRESH_INTERVAL_MS);
+}
+
+function tickCountdown() {
+  const elapsed = Date.now() - lastFetchTime;
+  const remaining = Math.max(0, REFRESH_INTERVAL_MS - elapsed);
+  const secs = Math.ceil(remaining / 1000);
+  const pct = (remaining / REFRESH_INTERVAL_MS) * 100;
+
+  const bar = document.getElementById('refresh-bar');
+  bar.style.width = pct + '%';
+  if      (secs <= 5)  bar.style.background = 'var(--red)';
+  else if (secs <= 15) bar.style.background = 'var(--yellow)';
+  else                 bar.style.background = 'var(--green)';
+
+  const lastT = lastSnap && lastSnap.timestamp
+    ? lastSnap.timestamp.substring(11, 19) + ' ET'
+    : '--';
+  document.getElementById('refresh-text').textContent =
+    'updated ' + lastT + ' • next in ' + secs + 's';
+}
+
+function startCountdown() {
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = setInterval(tickCountdown, 500);
+  tickCountdown();
 }
 
 // Init
 initCharts();
+_applyLadderViewConfig();
 fetchGex();
 startAutoRefresh();
+startCountdown();
 </script>
 </body>
 </html>

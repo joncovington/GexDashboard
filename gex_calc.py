@@ -175,8 +175,13 @@ def compute_gex_from_rows(rows: list[dict], spot: float) -> dict:
     if not rows or spot <= 0:
         return _empty_snapshot(spot)
 
+    # Find nearest expiration for IV skew aggregation
+    dtes = sorted({r["dte"] for r in rows if r.get("dte") is not None})
+    nearest_dte = dtes[0] if dtes else None
+
     # Aggregate by strike
     strike_data: dict[float, dict] = {}
+    iv_data: dict[float, dict] = {}   # for IV skew (nearest expiration only)
     for r in rows:
         k = r["strike"]
         if k not in strike_data:
@@ -193,6 +198,15 @@ def compute_gex_from_rows(rows: list[dict], spot: float) -> dict:
             strike_data[k]["put_gex"]      += gex_val
             strike_data[k]["put_vol_gex"]  += vol_gex_val
 
+        # IV skew — only for nearest expiration, only valid IVs
+        if r["dte"] == nearest_dte and r.get("iv", 0) > 0:
+            if k not in iv_data:
+                iv_data[k] = {"call_iv": None, "put_iv": None}
+            if r["option_type"] == "CALL":
+                iv_data[k]["call_iv"] = r["iv"]
+            else:
+                iv_data[k]["put_iv"]  = r["iv"]
+
     # Build sorted list
     by_strike = []
     for k in sorted(strike_data.keys()):
@@ -206,6 +220,12 @@ def compute_gex_from_rows(rows: list[dict], spot: float) -> dict:
             "put_vol_gex":  round(d["put_vol_gex"],  2),
             "net_vol_gex":  round(d["call_vol_gex"] - d["put_vol_gex"], 2),
         })
+
+    # IV skew (nearest expiration)
+    iv_by_strike = [
+        {"strike": k, "call_iv": iv_data[k]["call_iv"], "put_iv": iv_data[k]["put_iv"]}
+        for k in sorted(iv_data.keys())
+    ]
 
     # Totals
     total_net_gex     = sum(s["net_gex"]     for s in by_strike)
@@ -238,6 +258,8 @@ def compute_gex_from_rows(rows: list[dict], spot: float) -> dict:
         "total_net_vol_gex":  round(total_net_vol_gex, 2),
         "total_net_vol_gex_b": round(total_net_vol_gex / 1e9, 3),
         "by_strike":          by_strike,
+        "iv_by_strike":       iv_by_strike,
+        "nearest_dte":        nearest_dte,
         "call_wall":          call_wall,
         "put_wall":           put_wall,
         "zero_gamma":         zero_gamma,
@@ -296,6 +318,8 @@ def _empty_snapshot(spot: float) -> dict:
         "total_net_vol_gex":   0.0,
         "total_net_vol_gex_b": 0.0,
         "by_strike":           [],
+        "iv_by_strike":        [],
+        "nearest_dte":         None,
         "call_wall":           spot,
         "put_wall":            spot,
         "zero_gamma":          spot,
